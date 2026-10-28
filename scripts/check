@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Atalho do revisor de segurança. Funciona de qualquer pasta (o install.sh cria um link em ~/.local/bin/check).
+#   check                revisa as próximas unidades e envia o relatório ao Telegram
+#   check simular        revisa e mostra na tela, sem enviar nem gravar nada (= check --dry-run)
+#   check configurar     assistente de configuração
+#   check verificar      confere a configuração e as conexões (sem custo de IA)
+#   check units          lista as partes do código e quais serão revisadas
+#   check pistas         verificações automáticas e dependências vulneráveis (sem custo de IA)
+#   check run            modo agendado (revisões automáticas + botões do Telegram)
+#   check bench          mede o acerto em falhas reais já corrigidas (tem custo de IA)
+#   check --debug ...    mostra o detalhe técnico se der erro
+set -euo pipefail
+# Pasta do projeto = a pasta acima deste script (resolve o link de ~/.local/bin/check)
+AGENT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+BIN="$AGENT_DIR/.venv/bin/revisor"
+
+if [[ ! -x "$BIN" ]]; then
+  echo "Revisor não instalado em $AGENT_DIR. Rode: $AGENT_DIR/install.sh" >&2
+  exit 1
+fi
+
+globals=()  # opções do programa (vêm antes do subcomando)
+dry=()      # opção do subcomando once
+rest=()     # subcomando e demais argumentos
+for arg in "$@"; do
+  case "$arg" in
+    -q|--quiet|--debug) globals+=("$arg") ;;
+    --dry-run|simular)  dry=(--dry-run) ;;
+    -h|--help|ajuda)    exec "$BIN" --help ;;
+    *)                  rest+=("$arg") ;;
+  esac
+done
+
+cd "$AGENT_DIR"
+if (( ${#rest[@]} == 0 )); then
+  exec "$BIN" "${globals[@]}" once "${dry[@]}"
+fi
+exec "$BIN" "${globals[@]}" "${rest[@]}" "${dry[@]}"

@@ -1,0 +1,15 @@
+# Segredos e estado local
+.env
+.env.bak*
+data/
+
+# Perfis próprios descrevem o funcionamento interno do seu sistema: nunca vão para o git.
+# Só o perfil de exemplo é versionado.
+profiles/*
+!profiles/exemplo/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/

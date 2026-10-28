@@ -1,0 +1,13 @@
+# Perfil usado só pelos testes automáticos.
+nome = "ProjetoTeste"
+
+[prechecks]
+auth_markers = ["requireInternal(", "auth.getUser", "x-cron-secret"]
+internal_markers = ["requireInternal("]
+role_checks = ["assert_role"]
+tenant_filter = "organization_id|tenant_id"
+no_default_execute_since = "20261001000000"
+sensitive_tables = ["customers"]
+sensitive_label = "clientes"
+audit_markers = ["logAuditEvent"]
+safe_fetch_markers = ["assertSafeUrl"]

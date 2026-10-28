@@ -1,0 +1,34 @@
+# Perfil de EXEMPLO: um SaaS fictício multi-cliente em Supabase + React.
+# Copie esta pasta para profiles/<seu-projeto>/ e ajuste (ou rode `check configurar`, que copia para você).
+# Perfis próprios ficam fora do git: eles descrevem o funcionamento interno do seu sistema.
+
+# Nome que aparece nos relatórios
+nome = "AppExemplo"
+
+[prechecks]
+# Trechos de código que indicam "esta função valida quem chama". Uma Edge Function com verify_jwt=false
+# em que nenhum deles aparece vira pista para o revisor.
+auth_markers = ["auth.getUser", "getClaims", "requireUser(", "x-cron-secret"]
+
+# Trechos que indicam chamada interna (cron, outra função). Essas funções podem usar a service role sem filtrar
+# por cliente, porque processam todos os clientes de propósito.
+internal_markers = ["x-cron-secret"]
+
+# Funções SQL que conferem o papel do usuário. Função SECURITY DEFINER que escreve sem chamar nenhuma vira pista.
+role_checks = ["assert_role", "is_admin"]
+
+# Expressão regular que reconhece o filtro de cliente (tenant). Usar service role sem ele vira pista.
+tenant_filter = "organization_id|tenant_id"
+
+# Migration a partir da qual funções novas nascem SEM permissão de execução para PUBLIC
+# (se o seu projeto fez "ALTER DEFAULT PRIVILEGES ... REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC").
+# Vazio = comportamento padrão do Postgres (toda função nasce executável por PUBLIC).
+no_default_execute_since = ""
+
+# Tabelas com dados sensíveis: entram no tema "dados sensíveis" e no inventário.
+sensitive_tables = ["customers"]
+sensitive_label = "clientes"
+
+# Funções que registram auditoria e que validam URLs externas (reconhecidas no inventário).
+audit_markers = ["logAuditEvent"]
+safe_fetch_markers = ["assertSafeUrl"]
