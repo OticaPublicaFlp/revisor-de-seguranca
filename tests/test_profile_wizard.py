@@ -112,38 +112,122 @@ class WizardFlowTest(unittest.TestCase):
             wizard.run_wizard()
         return wizard.read_env(env), env
 
-    def test_full_setup_writes_validated_config(self):
+    def test_menu_navigation_presets_toggles_and_save(self):
         answers = [
-            "1",                                        # perfil: exemplo
-            "https://github.com/empresa/projeto.git",   # URL
-            "",                                         # branch: main
-            "2",                                        # acesso: token
-            "1",                                        # modelo: Opus
-            "",                                         # esforço: médio
-            "", "3",                                    # revisão dupla: sim · 3 partes
-            "",                                         # dependências: sim
-            "s", "", "1", "",                           # Telegram: sim · Enter após /start · conversa 1 · todos aprovam
-            "n",                                        # Slack: não
-            "2", "",                                    # agenda: dias úteis · fuso padrão
-            "",                                         # salvar: sim
+            # Menu -> Ritmo, Unidades e Voltas
+            "ritmo",
+            "units", "10",                          # seleciona preset 10 partes (sem digitar)
+            "turns", "20",                          # seleciona preset 20 voltas (sem digitar)
+            "mode", "diff",                         # muda modo para diff
+            "dual", "all",                          # muda atacante para all
+            "verify",                               # toggle imediato: true -> false
+            "recheck", "15",                        # seleciona preset 15 dias
+            "deps",                                 # toggle imediato: true -> false
+            "__back__",                             # volta ao menu principal
+            # Menu -> Inteligência Artificial
+            "ia",
+            "model", "claude-sonnet-5-5",           # seleciona Sonnet
+            "effort", "xhigh",                      # seleciona esforço xhigh
+            "key",                                  # informa chave (via getpass)
+            "__back__",
+            # Menu -> Projeto e Perfil
+            "projeto", "exemplo",
+            # Menu -> Repositório Git
+            "repo",
+            "url", "https://github.com/empresa/projeto.git",
+            "branch", "develop",
+            "auth", "token",
+            "__back__",
+            # Menu -> Telegram
+            "telegram",
+            "guided", "", "1", "s",                 # Enter após /start · conversa 1 · todos aprovam
+            "__back__",
+            # Menu -> Agenda
+            "agenda",
+            "cron", "0 8 * * 1-5",
+            "tz", "UTC",
+            "__back__",
+            # Menu -> Limites Técnicos Avançados
+            "avancado",
+            "chunk", "100000",
+            "tokens", "64000",
+            "max_chunks", "12",
+            "lookback", "50",
+            "__back__",
+            # Salvar e sair
+            "save",
         ]
-        secrets = ["token-github-falso", "sk-ant-chavefalsa", "123:token-bot-falso"]
+        secrets = ["sk-ant-chavefalsa", "token-github-falso", "123:token-bot-falso"]
         values, env = self.run_wizard(answers, secrets)
         self.assertEqual(values["PROFILE"], "exemplo")
+        self.assertEqual(values["REPO_URL"], "https://github.com/empresa/projeto.git")
+        self.assertEqual(values["REPO_BRANCH"], "develop")
         self.assertEqual(values["REPO_TOKEN"], "token-github-falso")
-        self.assertEqual(values["REVIEW_MODEL"], "claude-opus-5-5")
-        self.assertEqual(values["EFFORT"], "medium")
-        self.assertEqual(values["DUAL_REVIEW"], "critical")
-        self.assertEqual(values["MAX_UNITS"], "3")
+        self.assertEqual(values["REVIEW_MODEL"], "claude-sonnet-5-5")
+        self.assertEqual(values["EFFORT"], "xhigh")
+        self.assertEqual(values["REVIEW_MODE"], "diff")
+        self.assertEqual(values["DUAL_REVIEW"], "all")
+        self.assertEqual(values["VERIFY"], "false")
+        self.assertEqual(values["MAX_UNITS"], "10")
+        self.assertEqual(values["MAX_TURNS"], "20")
+        self.assertEqual(values["RECHECK_DAYS"], "15")
+        self.assertEqual(values["DEPS_CHECK"], "false")
+        self.assertEqual(values["CHUNK_CHARS"], "100000")
+        self.assertEqual(values["MAX_OUTPUT_TOKENS"], "64000")
+        self.assertEqual(values["MAX_CHUNKS"], "12")
+        self.assertEqual(values["INITIAL_LOOKBACK_COMMITS"], "50")
         self.assertEqual(values["TELEGRAM_CHAT_ID"], "-100")
         self.assertEqual(values["CRON_EXPR"], "0 8 * * 1-5")
-        self.assertEqual(values["SLACK_BOT_TOKEN"], "")
+        self.assertEqual(values["TZ"], "UTC")
         self.assertEqual(stat.S_IMODE(env.stat().st_mode), 0o600)
 
-    def test_cancel_at_the_end_writes_nothing(self):
-        answers = ["1", "https://github.com/e/p.git", "", "4", "1", "", "n", "2", "n", "n", "n", "1", "", "n"]
-        with self.assertRaises(SystemExit):
-            self.run_wizard(answers, ["sk-ant-x"])
+    def test_quit_without_saving_writes_nothing(self):
+        tmp = Path(tempfile.mkdtemp())
+        env = tmp / ".env"
+        answers = iter(["ritmo", "turns", "30", "esc", "quit"])
+        with mock.patch.object(wizard, "ENV", env), \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=lambda *_: next(answers)), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(SystemExit):
+                wizard.run_wizard()
+        self.assertFalse(env.exists())
+
+    def test_raw_arrow_keys_and_esc_navigation(self):
+        # Testa _read_key contra um pseudo-terminal (pty) real: garante que os 3 bytes da seta não se perdem em buffer
+        import os
+        import pty
+        import termios
+        import tty
+        master, slave = pty.openpty()
+        try:
+            tty.setcbreak(slave, termios.TCSANOW)
+            with os.fdopen(slave, "r", encoding="utf-8", closefd=False) as slave_io, mock.patch("sys.stdin", slave_io):
+                for raw_bytes, expected in (
+                    (b"\x1b[B", "DOWN"),
+                    (b"\x1b[A", "UP"),
+                    (b"\x1bOB", "DOWN"),
+                    (b"\x1bOA", "UP"),
+                    (b"\r", "ENTER"),
+                    (b"\x1b", "ESC"),
+                ):
+                    os.write(master, raw_bytes)
+                    self.assertEqual(wizard._read_key(), expected)
+        finally:
+            os.close(slave)
+            os.close(master)
+
+        # Testa choose() em modo raw navegando com DOWN/ENTER e saindo com ESC
+        opts = [("a", "Opção A"), ("b", "Opção B"), ("c", "Opção C")]
+        with mock.patch.object(wizard, "_use_raw_menu", return_value=True), \
+                mock.patch.object(wizard, "_read_key", side_effect=["DOWN", "DOWN", "UP", "ENTER"]), \
+                mock.patch("sys.stdout.write"), mock.patch("sys.stdout.flush"), mock.patch("builtins.print"):
+            self.assertEqual(wizard.choose("Teste", opts, default="a", allow_esc=True), "b")
+
+        with mock.patch.object(wizard, "_use_raw_menu", return_value=True), \
+                mock.patch.object(wizard, "_read_key", side_effect=["ESC"]), \
+                mock.patch("sys.stdout.write"), mock.patch("sys.stdout.flush"), mock.patch("builtins.print"):
+            self.assertEqual(wizard.choose("Teste", opts, default="a", allow_esc=True), wizard._BACK)
 
     def test_requires_interactive_terminal(self):
         with mock.patch("sys.stdin.isatty", return_value=False):
