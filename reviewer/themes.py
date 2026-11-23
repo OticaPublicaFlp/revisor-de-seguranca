@@ -21,6 +21,11 @@ THEMES = {
     "funcoes-privilegiadas": ("Funções SQL privilegiadas", frozenset({"SQL", "DB"}),
                               "Cada função SECURITY DEFINER executável pelo app ignora a RLS. Confirme que ela filtra o "
                               "cliente (tenant) do chamador e confere papel antes de escrever; leia a definição final de cada uma."),
+    "matriz-rls-papeis": ("Matriz RLS, policies de escrita e acesso direto via PostgREST",
+                          frozenset({"SQL", "DB", "FE"}),
+                          "Um atacante logado (ex.: visualizador ou operador) pode ignorar o React e chamar o PostgREST direto com o próprio JWT. "
+                          "Examine a matriz de tabelas, policies e GRANTs abaixo: procure tabelas onde um papel baixo consegue fazer SELECT de colunas secretas, "
+                          "INSERT/UPDATE/DELETE indevido, alterar o próprio role/tenant (UPDATE sem WITH CHECK) ou editar/apagar histórico imutável."),
 }
 
 
@@ -58,6 +63,25 @@ def _definers(sql: dict, p, only=None) -> list[str]:
     return rows
 
 
+def _rls_matrix(sql: dict, p) -> str:
+    rows = ["| tabela | policy | arquivo:linha | comando | papéis (TO) | WITH CHECK | checa papel |",
+            "|---|---|---|---|---|---|---|"]
+    for (pol, table), info in sorted(sql["policies"].items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        text = info["text"]
+        m = re.search(r"\bfor\s+(all|select|insert|update|delete)\b", text)
+        cmd = (m.group(1) if m else "all").upper()
+        roles = ", ".join(info["roles"]) or "(public/todos)"
+        has_wc = _yn("with check" in text)
+        has_role = _yn(any(rc.lower() in text for rc in p.role_checks)
+                       or "is_otica_admin" in text or "otica_current_role" in text)
+        rows.append(f"| {table} | {pol} | {info['file']}:{info['line']} | {cmd} | {roles} | {has_wc} | {has_role} |")
+    parts = ["## Policies RLS no estado final\n" + ("\n".join(rows) if len(rows) > 2 else "nenhuma")]
+    no_rls = [f"- {name} ({t['file']}:{t['line']})" for name, t in sorted(sql["tables"].items()) if not t["rls"]]
+    if no_rls:
+        parts.append("## Tabelas sem RLS habilitada\n" + "\n".join(no_rls))
+    return "\n\n".join(parts)
+
+
 def _inventory(theme: str, ctx: dict, src_files: list[str], p) -> str:
     edge, sql = ctx["edge"], ctx["sql"]
     if theme == "entradas":
@@ -86,6 +110,8 @@ def _inventory(theme: str, ctx: dict, src_files: list[str], p) -> str:
             "## Funções SQL privilegiadas que tocam as tabelas sensíveis\n" + "\n".join(_definers(sql, p, touches)),
             "## Arquivos de front-end ligados a exportação/relatório\n" + "\n".join(f"- {f}" for f in exports[:60]),
         ])
+    if theme == "matriz-rls-papeis":
+        return _rls_matrix(sql, p)
     return "## Funções SECURITY DEFINER executáveis pelo app\n" + "\n".join(_definers(sql, p))
 
 

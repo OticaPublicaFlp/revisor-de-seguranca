@@ -75,6 +75,21 @@ class ToolsTest(unittest.TestCase):
         # padrão que parece flag é só texto de busca (vai depois de -e)
         self.assertEqual(self.run_tool("search_repo", pattern="--help"), "nenhuma ocorrência")
 
+    def test_inspect_symbol_groups_migrations_and_code(self):
+        commit(self.tmp / "origin", {
+            "supabase/migrations/001.sql": "CREATE POLICY p ON public.otica_patients FOR SELECT TO authenticated USING (true);\n",
+            "supabase/functions/exp/index.ts": "supa.from('otica_patients').select('*')\n",
+            "src/pages/Patients.tsx": "supabase.from('otica_patients').select('id')\n",
+        }, "c2")
+        repo, head = gitrepo.sync(self.cfg)
+        out = tools.execute(self.cfg, repo, head, "inspect_symbol", {"name": "otica_patients"})
+        self.assertIn("## Migrations / Config", out)
+        self.assertIn("supabase/migrations/001.sql:1:", out)
+        self.assertIn("## Código (Edge Functions / Front-end)", out)
+        self.assertIn("supabase/functions/exp/index.ts:1:", out)
+        self.assertIn("src/pages/Patients.tsx:1:", out)
+        self.assertIn("informe o nome", tools.execute(self.cfg, repo, head, "inspect_symbol", {"name": ""}))
+
 
 class FakeClient:
     """Cliente Anthropic simulado: devolve respostas pré-definidas, uma por volta."""

@@ -190,9 +190,16 @@ def sql_state(cfg: Config, repo, sha: str) -> dict:
     exec_roles: dict[str, set[str]] = {}
     policies: dict[tuple, dict] = {}
     grants: dict[tuple, dict] = {}
+    tables: dict[str, dict] = {}   # tabelas de public: RLS ligada? privilégios padrão de anon revogados?
+    views: dict[str, dict] = {}
+    buckets: dict[str, dict] = {}  # buckets públicos sem restrição de tipo de arquivo
+    anon_default_revoked = False   # ALTER DEFAULT PRIVILEGES ... REVOKE ... ON TABLES FROM anon
     for path in sorted(p for p in _ls(cfg, repo, sha, "supabase/migrations") if p.endswith(".sql")):
         for line, stmt in _statements(_show(cfg, repo, sha, path)):
             low = stmt.lower()
+            if _track_objects(low, path, line, tables, views, buckets, anon_default_revoked):
+                anon_default_revoked = anon_default_revoked or low.startswith("alter default privileges")
+                continue
             m = re.match(r"create\s+(?:or\s+replace\s+)?function\s+([\w.\"]+)\s*\(", low)
             if m:
                 fn = _name(m.group(1))
@@ -215,6 +222,9 @@ def sql_state(cfg: Config, repo, sha: str) -> dict:
                 for m in re.finditer(r"revoke\s+all\s+on\s+(?:table|sequence)\s+%s\s+from\s+([\w\s,]+?)'", low):
                     for key in [k for k in grants if k[1] in _roles(m.group(1))]:
                         grants.pop(key)
+                    if "anon" in _roles(m.group(1)):
+                        for t in tables.values():
+                            t["anon_revoked"] = True
                 continue
             m = re.match(r"(grant|revoke)\s+(?:all|execute)(?:\s+privileges)?\s+on\s+(all\s+functions\s+in\s+schema\s+\w+|"
                          r"function\s+([\w.\"]+))[^;]*?\s+(to|from)\s+(.+)", low, re.S)
@@ -228,7 +238,8 @@ def sql_state(cfg: Config, repo, sha: str) -> dict:
             if m:
                 to = re.search(r"\bto\s+([\w\s,]+?)(?:\s+using\b|\s+with\s+check\b|$)", m.group(3), re.S)
                 roles = [r.strip() for r in to.group(1).split(",")] if to else []  # sem TO: padrão do Postgres
-                policies[(m.group(1).strip('"'), _name(m.group(2)))] = {"file": path, "line": line, "roles": roles}
+                policies[(m.group(1).strip('"'), _name(m.group(2)))] = {"file": path, "line": line, "roles": roles,
+                                                                        "text": m.group(3)}
                 continue
             m = re.match(r"drop\s+policy\s+(?:if\s+exists\s+)?(\"[^\"]+\"|\w+)\s+on\s+([\w.\"]+)", low)
             if m:
@@ -237,6 +248,13 @@ def sql_state(cfg: Config, repo, sha: str) -> dict:
             m = re.match(r"(grant|revoke)\s+(.+?)\s+on\s+(.+?)\s+(to|from)\s+(.+)", low, re.S)
             if m:
                 roles = {r.strip().split()[0] for r in m.group(5).split(",") if r.strip()}
+                if m.group(1) == "revoke" and roles & {"anon", "public"}:
+                    target = " ".join(m.group(3).split())
+                    names = (list(tables) if target.startswith("all tables in schema public") else
+                             [_name(n) for n in re.sub(r"^table\s+", "", target).split(",")])
+                    for n in names:
+                        if n in tables:
+                            tables[n]["anon_revoked"] = True
                 for role in roles & {"anon", "public"}:
                     key = (" ".join(m.group(3).split()), role)
                     if m.group(1) == "grant":
@@ -245,7 +263,54 @@ def sql_state(cfg: Config, repo, sha: str) -> dict:
                         grants.pop(key, None)
     for fn, f in funcs.items():
         f["exec"] = sorted(exec_roles.get(fn, set()))
-    return {"functions": funcs, "policies": policies, "grants": grants}
+    return {"functions": funcs, "policies": policies, "grants": grants, "tables": tables, "views": views,
+            "buckets": buckets}
+
+
+def _track_objects(low: str, path: str, line: int, tables: dict, views: dict, buckets: dict,
+                   anon_default_revoked: bool) -> bool:
+    """Tabelas, views, buckets e privilégios padrão (base das verificações dos Advisors do Supabase).
+    Retorna True se o comando foi consumido aqui."""
+    m = re.match(r"create\s+table\s+(?:if\s+not\s+exists\s+)?([\w.\"]+)", low)
+    if m:
+        name = _name(m.group(1))
+        if name.startswith("public.") and name not in tables:
+            tables[name] = {"file": path, "line": line, "rls": False, "anon_revoked": anon_default_revoked}
+        return True
+    m = re.match(r"drop\s+table\s+(?:if\s+exists\s+)?([\w.\"]+)", low)
+    if m:
+        tables.pop(_name(m.group(1)), None)
+        return True
+    m = re.match(r"alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([\w.\"]+)\s+(enable|disable)\s+row\s+level\s+security", low)
+    if m:
+        if _name(m.group(1)) in tables:
+            tables[_name(m.group(1))]["rls"] = m.group(2) == "enable"
+        return True
+    m = re.match(r"create\s+(?:or\s+replace\s+)?view\s+(?:if\s+not\s+exists\s+)?([\w.\"]+)", low)
+    if m:
+        views[_name(m.group(1))] = {"file": path, "line": line,
+                                    "invoker": bool(re.search(r"security_invoker\s*=\s*(true|on|1|yes)", low))}
+        return True
+    m = re.match(r"alter\s+view\s+(?:if\s+exists\s+)?([\w.\"]+)\s+set\s*\(\s*security_invoker\s*=\s*(true|on|1|yes)", low)
+    if m:
+        if _name(m.group(1)) in views:
+            views[_name(m.group(1))]["invoker"] = True
+        return True
+    m = re.match(r"drop\s+view\s+(?:if\s+exists\s+)?([\w.\"]+)", low)
+    if m:
+        views.pop(_name(m.group(1)), None)
+        return True
+    if re.match(r"alter\s+default\s+privileges\b.*\brevoke\b.*\bon\s+tables\b.*\bfrom\b.*\banon\b", low, re.S):
+        return True
+    if "storage.buckets" in low:
+        ids = re.findall(r"'([\w.-]+)'", low)
+        if low.startswith("insert") and re.search(r"\btrue\b", low) and "allowed_mime_types" not in low and ids:
+            buckets[ids[0]] = {"file": path, "line": line}
+        elif "allowed_mime_types" in low or re.search(r"public\s*=\s*false", low):
+            for i in ids:
+                buckets.pop(i, None)
+        return low.startswith(("insert", "update"))
+    return False
 
 
 def _sql_hints(state: dict, p) -> list[Hint]:
@@ -274,6 +339,55 @@ def _sql_hints(state: dict, p) -> list[Hint]:
         if writes and not any(rc.lower() in low for rc in p.role_checks):
             hints.append(Hint("SQL-2", f["file"], f["line"],
                               f"{name} é SECURITY DEFINER, executável por {who}, escreve no banco e não confere papel"))
+        if re.search(r"\bexecute\b(?!\s+(?:procedure|function)\b)", low):
+            hints.append(Hint("SQL-2", f["file"], f["line"],
+                              f"{name} é SECURITY DEFINER, executável por {who} e usa EXECUTE dinâmico: "
+                              "conferir risco de injeção SQL ou escalada"))
+    hints += _advisor_hints(state)
+    return hints
+
+
+ALWAYS_TRUE = re.compile(r"\b(using|with\s+check)\s*\(\s*\(?\s*(true|1\s*=\s*1)\s*\)?\s*\)")
+
+
+def _advisor_hints(state: dict) -> list[Hint]:
+    """Versão estática (lendo as migrations) das verificações de segurança dos Database Advisors do Supabase."""
+    hints = []
+    for name, t in state["tables"].items():
+        if not t["rls"]:
+            hints.append(Hint("SQL-1", t["file"], t["line"], f"{name} fica sem RLS no estado final "
+                              "(advisor rls_disabled_in_public): pela API, quem tem GRANT lê e altera tudo"))
+    by_file: dict[str, list[tuple[int, str]]] = {}  # uma pista por migration, não uma por tabela
+    for name, t in state["tables"].items():
+        if not t["anon_revoked"]:
+            by_file.setdefault(t["file"], []).append((t["line"], name.removeprefix("public.")))
+    for path, items in by_file.items():
+        names = ", ".join(n for _, n in items[:8]) + (f" e mais {len(items) - 8}" if len(items) > 8 else "")
+        hints.append(Hint("SQL-1", path, min(line for line, _ in items), f"nenhuma migration revoga de anon os "
+                          f"privilégios padrão de {names} (o Supabase concede SELECT/INSERT/UPDATE/DELETE/TRUNCATE; "
+                          "TRUNCATE ignora a RLS)"))
+    for (pol, table), info in state["policies"].items():
+        text = info["text"]
+        if re.search(r"user_metadata|raw_user_meta_data", text):
+            hints.append(Hint("SQL-10", info["file"], info["line"], f"policy '{pol}' em {table} usa user_metadata, que "
+                              "o próprio usuário edita (advisor rls_references_user_metadata)"))
+        cmd = re.search(r"\bfor\s+(all|select|insert|update|delete)\b", text)
+        for_clients = not info["roles"] or any(r.split()[0] in CLIENT_ROLES for r in info["roles"])  # sem TO = todos
+        if (for_clients and "as restrictive" not in text and (cmd.group(1) if cmd else "all") != "select"
+                and ALWAYS_TRUE.search(text)):
+            hints.append(Hint("SQL-11", info["file"], info["line"], f"policy de escrita '{pol}' em {table} tem condição "
+                              "sempre verdadeira (advisor rls_policy_always_true)"))
+        if for_clients and (cmd.group(1) if cmd else "") == "update" and "with check" not in text:
+            hints.append(Hint("SQL-2", info["file"], info["line"],
+                              f"policy de UPDATE '{pol}' em {table} não tem WITH CHECK: conferir se o usuário "
+                              "consegue alterar colunas sensíveis (role, organization_id, is_active)"))
+    for name, v in state["views"].items():
+        if not v["invoker"]:
+            hints.append(Hint("SQL-12", v["file"], v["line"], f"view {name} sem security_invoker: roda com os privilégios "
+                              "do dono e ignora a RLS (advisor security_definer_view)"))
+    for bucket, b in state["buckets"].items():
+        hints.append(Hint("SQL-13", b["file"], b["line"], f"bucket público '{bucket}' sem allowed_mime_types: "
+                          "aceita SVG/HTML com script"))
     return hints
 
 
@@ -321,6 +435,60 @@ def _secret_hints(cfg: Config, repo, sha: str) -> list[Hint]:
     return hints
 
 
+def _secret_matches(path: str, text: str):
+    """(rótulo, valor) de cada segredo na linha, com os mesmos filtros da busca na versão atual."""
+    if SKIP_SECRET_FILES.search(path) or path.endswith(".md"):
+        return
+    for label, pattern in SECRET_PATTERNS:
+        if label == "chave privada" and PEM_HANDLING.search(text):
+            continue
+        for m in re.finditer(pattern, text):
+            yield label, m.group(0)
+    for m in JWT.finditer(text):
+        if _jwt_role(m.group(1)) == "service_role":
+            yield "JWT com role=service_role", m.group(0)
+
+
+def history_secret_findings(cfg: Config, repo, sha: str) -> list[dict]:
+    """Segredos que já foram removidos do código mas continuam no histórico do git (qualquer clone os tem).
+
+    Os que ainda estão na versão atual já viram pista EF-6; aqui entram só os que sumiram. O valor nunca sai daqui.
+    """
+    combined = "|".join(p for _, p in SECRET_PATTERNS) + "|" + JWT.pattern
+    log = gitrepo._git(cfg, repo, "log", "-p", "--unified=0", "--no-color", "--no-ext-diff", "-G", combined,
+                       "--format=@@C %h %cs", sha)
+    current = {value for path, _, text in _grep(cfg, repo, sha, combined, ".") for _, value in _secret_matches(path, text)}
+    found: dict[tuple, dict] = {}  # (rótulo, arquivo) -> commit mais antigo que adicionou
+    commit = date = path = ""
+    for line in log.splitlines():
+        if line.startswith("@@C "):
+            _, commit, date = line.split(" ", 2)
+        elif line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else ""
+        elif line.startswith("+") and path:
+            for label, value in _secret_matches(path, line[1:]):
+                if value not in current:  # o log vem do mais novo para o mais antigo: fica o commit de origem
+                    found[(label, path)] = {"commit": commit, "date": date}
+    out = []
+    for (label, path), c in found.items():
+        test = bool(TEST_FILE.search(path))
+        out.append({
+            "regra": "EF-6",
+            "severity": "low" if test else "high",
+            "cwe": "CWE-798",
+            "file": path,
+            "line": None,
+            "title": f"Possível {label} no histórico do git (commit {c['commit']})",
+            "description": (f"Uma possível {label} foi adicionada em {path} no commit {c['commit']} ({c['date']}) e não está "
+                            "mais no código atual, mas continua no histórico: qualquer pessoa com acesso ao repositório "
+                            "ou a um clone antigo consegue lê-la. O valor foi omitido deste relatório."
+                            + (" É um arquivo de teste: provavelmente fictícia, confirmar." if test else "")),
+            "suggestion": ("Se a chave era real, troque-a (rotacione) no serviço de origem e revogue a antiga. Apagar do "
+                           "histórico não basta: clones e cópias já a têm."),
+        })
+    return out
+
+
 PII_LOG = (r"console\.(log|info|warn|error|debug)\(.*\b(cpf|cns|phone|telefone|nascimento|birth_?date|receita|"
            r"patient_?name|nome_?paciente)\b")
 
@@ -335,6 +503,11 @@ def _pii_and_front_hints(cfg: Config, repo, sha: str) -> list[Hint]:
         hints.append(Hint("FE-7", path, line, "grava dado sensível no armazenamento do navegador"))
     for path, line, _ in _grep(cfg, repo, sha, r"dangerouslySetInnerHTML|\.innerHTML\s*=", "src"):
         hints.append(Hint("FE-10", path, line, "HTML injetado sem passar pelo React: conferir se o conteúdo é sanitizado"))
+    mass_assign = r"\.(update|insert|upsert)\(\s*(body|reqBody|requestBody|payload)\s*\)"
+    for path, line, _ in _grep(cfg, repo, sha, mass_assign, "supabase/functions", "src"):
+        hints.append(Hint("DB-2", path, line,
+                          "escrita direta no banco com objeto do corpo/payload sem lista explícita de campos permitidos "
+                          "(risco de atribuição em massa de role/organization_id/status)"))
     return hints
 
 

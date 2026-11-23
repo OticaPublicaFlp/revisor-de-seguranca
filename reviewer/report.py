@@ -48,7 +48,7 @@ def markdown_full(run_id: int, base: str, head: str, findings: list[dict], verif
                   project: str = "projeto") -> str:
     out = [f"# {'Simulação' if run_id == 0 else f'Revisão #{run_id}'} — {project}", "", f"Referência: `{ref_label(base, head)}`", "", _counts(findings), ""]
     for f in findings:
-        rule = f" `{f['regra']}`" if f.get("regra") else ""
+        rule = "".join(f" `{f[k]}`" for k in ("regra", "cwe") if f.get(k))
         out += [
             f"## {EMOJI[f['severity']]} [{LABEL[f['severity']]}]{rule} {f['title']}",
             f"`{_loc(f)}`",

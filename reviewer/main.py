@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import dataclasses
 import html
 import json
 import logging
@@ -21,7 +22,8 @@ log = logging.getLogger("reviewer")
 
 # ---------------------------------------------------------------- pipeline
 
-def run_review(cfg: Config, store: Store, tg: Telegram | None, dry_run: bool = False) -> None:
+def run_review(cfg: Config, store: Store, tg: Telegram | None, dry_run: bool = False,
+               base_sha: str | None = None, gatekeeper: bool = False) -> None:
     store.set("last_run_at", now_iso())
     llm.reset_stats()
     ui.step(f"Sincronizando {cfg.repo_branch} do repositório remoto")
@@ -31,7 +33,7 @@ def run_review(cfg: Config, store: Store, tg: Telegram | None, dry_run: bool = F
     finally:
         ui.wait_stop()
     if cfg.mode == "diff":
-        _review_diff(cfg, store, tg, repo, head, dry_run)
+        _review_diff(cfg, store, tg, repo, head, dry_run, base_sha=base_sha, gatekeeper=gatekeeper)
     else:
         _review_code(cfg, store, tg, repo, head, dry_run)
 
@@ -60,15 +62,31 @@ def _deliver(cfg: Config, store: Store, tg: Telegram | None, base: str, head: st
     return run_id
 
 
-def _review_diff(cfg: Config, store: Store, tg: Telegram | None, repo, head: str, dry_run: bool) -> None:
+def _resolve_custom_base(cfg: Config, repo, head: str, base_sha: str) -> str:
+    if base_sha == "HEAD" or base_sha.startswith(("HEAD~", "HEAD^")):
+        ref = head + base_sha[4:]
+    else:
+        ref = f"{base_sha}^{{commit}}"
+    return gitrepo._git(cfg, repo, "rev-parse", ref).strip()
+
+
+def _review_diff(cfg: Config, store: Store, tg: Telegram | None, repo, head: str, dry_run: bool,
+                 base_sha: str | None = None, gatekeeper: bool = False) -> None:
     last = store.get("last_sha")
-    if last == head:
+    if not base_sha and last == head and not (gatekeeper and dry_run):
         ui.done(f"Sem commits novos desde {head[:7]}")
         if tg and not dry_run:
             tg.send_text(f"✅ Revisão: sem commits novos na <code>{cfg.repo_branch}</code> (<code>{head[:7]}</code>).")
         return
 
-    base = gitrepo.resolve_base(cfg, repo, last, head)
+    if base_sha:
+        base = _resolve_custom_base(cfg, repo, head, base_sha)
+    elif gatekeeper and (last is None or last == head):
+        count = int(gitrepo._git(cfg, repo, "rev-list", "--count", head).strip())
+        base = gitrepo._git(cfg, repo, "rev-parse", f"{head}~1").strip() if count > 1 else gitrepo.resolve_base(cfg, repo, last, head)
+    else:
+        base = gitrepo.resolve_base(cfg, repo, last, head)
+
     files = gitrepo.diff_by_file(cfg, repo, base, head)
     chunks = gitrepo.chunk_diffs(files, cfg.chunk_chars)
     partial = len(chunks) > cfg.max_chunks
@@ -80,7 +98,13 @@ def _review_diff(cfg: Config, store: Store, tg: Telegram | None, repo, head: str
     if len(files) > 15:
         ui.info(f"  · … e mais {len(files) - 15}")
 
-    findings, verified = llm.review_chunks(cfg, repo, head, chunks) if chunks else ([], [])
+    diff_hints: list[str] = []
+    if chunks:
+        hints, _ctx = prechecks.run(cfg, repo, head)
+        diff_hints = prechecks.for_files(hints, {name for name, _ in files})
+    findings, verified = llm.review_chunks(
+        cfg, repo, head, chunks, hints=diff_hints or None, dual=(cfg.dual_review != "off")
+    ) if chunks else ([], [])
     new = store.filter_new(findings)
     if len(new) < len(findings):
         ui.info(f"{len(findings) - len(new)} achado(s) já reportado(s) antes foram omitidos")
@@ -90,7 +114,8 @@ def _review_diff(cfg: Config, store: Store, tg: Telegram | None, repo, head: str
     if run_id is None:
         return
     # Só avança o marcador depois de entregar o relatório; se algo acima falhar, a próxima execução repete.
-    store.set("last_sha", head)
+    if not base_sha:
+        store.set("last_sha", head)
     ui.done(f"Revisão #{run_id} concluída: {len(new)} achado(s) novo(s) enviados ao Telegram")
 
 
@@ -126,6 +151,14 @@ def _review_code(cfg: Config, store: Store, tg: Telegram | None, repo, head: str
             ui.finding(f)
         if not dep_findings:
             ui.info("nenhuma vulnerabilidade conhecida nas dependências")
+
+    ui.step("Segredos removidos do código que continuam no histórico do git")
+    history = prechecks.history_secret_findings(cfg, repo, head)
+    for f in history:
+        ui.finding(f)
+    if not history:
+        ui.info("nenhum segredo esquecido no histórico")
+    dep_findings += history
 
     if not plan and not store.filter_new(dep_findings):
         ui.done("Todas as unidades estão em dia; nada a revisar")
@@ -164,7 +197,7 @@ def _review_code(cfg: Config, store: Store, tg: Telegram | None, repo, head: str
 
     covered = len(fresh | {u.key for u in done})
     note = (f"Cobertura: {covered}/{len(all_units)} unidades. Revisadas agora: "
-            f"{', '.join(u.key for u in done) or 'nenhuma (só dependências)'}.")
+            f"{', '.join(u.key for u in done) or 'nenhuma (só dependências e histórico)'}.")
     if failure:
         note += f"\n⚠️ Falhou em {failure[0]} ({errors.explain(failure[1])[0]}); será tentada na próxima execução."
     run_id = _deliver(cfg, store, tg, "", head, new, verified, note, dry_run)
@@ -207,6 +240,12 @@ def show_hints(cfg: Config) -> None:
         print(f"\n  {rule}")
         for h in (h for h in hints if h.rule == rule):
             print(f"    · {h.text().split('] ', 1)[1]}")
+    ui.step("Segredos removidos do código que continuam no histórico do git")
+    history = prechecks.history_secret_findings(cfg, repo, head)
+    for f in history:
+        ui.finding(f)
+    if not history:
+        ui.info("nenhum segredo esquecido no histórico")
     if cfg.deps_check:
         ui.step("Dependências com vulnerabilidade conhecida (OSV)")
         found = deps.findings(cfg, repo, head)
@@ -403,6 +442,14 @@ def _dispatch(args) -> None:
                   start=args.inicio)
         return
 
+    if args.cmd == "diff":
+        cfg = dataclasses.replace(load_config(need_telegram=not args.dry_run), mode="diff", dual_review="all")
+        _banner(cfg, "gatekeeper/diff (somente mudanças, com atacante)" + (" · simulação" if args.dry_run else ""))
+        store = Store(cfg.data_dir / "state.db")
+        run_review(cfg, store, None if args.dry_run else Telegram(cfg), dry_run=args.dry_run,
+                   base_sha=args.base, gatekeeper=True)
+        return
+
     cfg = load_config(need_telegram=not args.dry_run)
     _banner(cfg, "simulação (nada será enviado nem gravado)" if args.dry_run else "execução única")
     store = Store(cfg.data_dir / "state.db")
@@ -430,6 +477,10 @@ def main() -> None:
     once = sub.add_parser("once", help="Executa uma revisão agora e sai")
     once.add_argument("--dry-run", action="store_true",
                       help="Imprime o relatório; não usa Telegram nem grava estado")
+    diff_p = sub.add_parser("diff", help="Revisa só as mudanças recentes (modo Gatekeeper/CI, com olhar de atacante)")
+    diff_p.add_argument("--base", help="Commit/branch base para comparar com o HEAD (padrão: último SHA revisado ou HEAD~1)")
+    diff_p.add_argument("--dry-run", action="store_true",
+                        help="Imprime o relatório; não usa Telegram nem grava estado")
     args = parser.parse_args()
 
     ui.enabled = not args.quiet

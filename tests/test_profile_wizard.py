@@ -18,7 +18,8 @@ class ProfileTest(unittest.TestCase):
         self.assertTrue(p.context and p.rules and p.examples)
         self.assertTrue(p.tenant_filter.search("organization_id"))
         # IDs que as pistas automáticas usam precisam existir no checklist do exemplo
-        for rid in ("EF-2", "EF-6", "EF-7", "EF-9", "DB-2", "SQL-1", "SQL-2", "FE-7", "FE-10"):
+        for rid in ("EF-2", "EF-6", "EF-7", "EF-9", "DB-2", "SQL-1", "SQL-2", "SQL-10", "SQL-11", "SQL-12", "SQL-13",
+                    "FE-7", "FE-10"):
             self.assertIn(f"**{rid} ", p.rules, rid)
 
     def test_missing_profile_has_clear_message(self):
@@ -42,6 +43,7 @@ class ProfileTest(unittest.TestCase):
             text = llm._prompt(cfg, name, frozenset({"EF"}))[0]["text"]
             self.assertNotIn("{{", text, name)
             self.assertIn("ProjetoTeste", text, name)
+            self.assertIn("Quem consegue explorar", text, name)  # escala de severidade compartilhada
 
     def test_generic_prompts_do_not_carry_project_specifics(self):
         """Os modelos em prompts/ são genéricos: o que é do projeto vem do perfil."""

@@ -135,6 +135,69 @@ class DynamicRevokeTest(RepoCase):
         self.assertEqual(ctx["sql"]["functions"]["public.f"]["exec"], [])
 
 
+class AdvisorHintsTest(RepoCase):
+    """Versão estática das verificações dos Database Advisors do Supabase."""
+    FILES = {
+        "supabase/migrations/20250101000000_tables.sql": (
+            "CREATE TABLE public.sem_rls (id int);\n"
+            "CREATE TABLE public.com_rls (id int);\n"
+            "ALTER TABLE public.com_rls ENABLE ROW LEVEL SECURITY;\n"
+            "CREATE TABLE public.revogada (id int);\n"
+            "ALTER TABLE public.revogada ENABLE ROW LEVEL SECURITY;\n"
+            "REVOKE ALL ON TABLE public.revogada FROM anon;\n"
+            "CREATE POLICY \"meta\" ON public.com_rls FOR SELECT TO authenticated\n"
+            "  USING ((auth.jwt() -> 'user_metadata' ->> 'role') = 'admin');\n"
+            "CREATE POLICY \"tudo\" ON public.com_rls FOR INSERT WITH CHECK (true);\n"
+            "CREATE POLICY \"leitura\" ON public.com_rls FOR SELECT TO authenticated USING (true);\n"
+            "CREATE POLICY \"servidor\" ON public.com_rls FOR UPDATE TO service_role USING (true);\n"
+            "CREATE VIEW public.v_aberta AS SELECT * FROM public.com_rls;\n"
+            "CREATE VIEW public.v_ok WITH (security_invoker = true) AS SELECT * FROM public.com_rls;\n"
+            "INSERT INTO storage.buckets (id, name, public) VALUES ('logos', 'logos', true);\n"
+            "INSERT INTO storage.buckets (id, name, public) VALUES ('docs', 'docs', true);\n"),
+        "supabase/migrations/20250201000000_fix.sql": (
+            "UPDATE storage.buckets SET allowed_mime_types = ARRAY['image/png'] WHERE id = 'docs';\n"
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;\n"
+            "CREATE TABLE public.nova (id int);\n"
+            "ALTER TABLE public.nova ENABLE ROW LEVEL SECURITY;\n"),
+    }
+
+    def test_advisor_checks_follow_final_state(self):
+        texts = [h.text() for h in self.hints()[0]]
+        has = lambda *parts: any(all(p in t for p in parts) for t in texts)  # noqa: E731
+        self.assertTrue(has("[SQL-1]", "public.sem_rls fica sem RLS"))
+        self.assertFalse(has("public.com_rls fica sem RLS"))
+        self.assertTrue(has("revoga de anon", "com_rls"))
+        self.assertFalse(has("revoga de anon", "revogada"))
+        self.assertFalse(has("revoga de anon", "nova"))           # criada depois do ALTER DEFAULT PRIVILEGES
+        self.assertTrue(has("[SQL-10]", "'meta'"))
+        self.assertTrue(has("[SQL-11]", "'tudo'"))                  # sem TO: vale para todos
+        self.assertFalse(has("[SQL-11]", "'leitura'"))              # leitura fica de fora (pode ser intencional)
+        self.assertFalse(has("[SQL-11]", "'servidor'"))             # só service_role
+        self.assertTrue(has("[SQL-12]", "public.v_aberta"))
+        self.assertFalse(has("public.v_ok"))
+        self.assertTrue(has("[SQL-13]", "'logos'"))
+        self.assertFalse(has("[SQL-13]", "'docs'"))                 # restringido por migration posterior
+
+
+class HistorySecretsTest(RepoCase):
+    FILES = {
+        "src/old.ts": "export const K = 'AKIA" + "ABCDEFGHIJKLMNOP'\n",
+        "src/still.ts": "export const S = 'AKIA" + "QRSTUVWXYZ012345'\n",
+        "tests/fixture.ts": "export const T = 'AKIA" + "ZZZZZZZZZZZZZZZZ'\n",
+    }
+
+    def test_only_removed_secrets_are_reported_without_value(self):
+        commit(self.tmp / "origin", {"src/old.ts": "export const K = Deno.env.get('K')\n",
+                                     "tests/fixture.ts": "export const T = ''\n"}, "remove a chave")
+        self.repo, self.head = gitrepo.sync(self.cfg)
+        found = {f["file"]: f for f in prechecks.history_secret_findings(self.cfg, self.repo, self.head)}
+        self.assertEqual(set(found), {"src/old.ts", "tests/fixture.ts"})  # src/still.ts já é pista da versão atual
+        self.assertEqual(found["src/old.ts"]["severity"], "high")
+        self.assertEqual(found["tests/fixture.ts"]["severity"], "low")
+        for f in found.values():
+            self.assertNotIn("AKIA", json.dumps(f))
+
+
 class EdgeAndSecretsTest(RepoCase):
     FILES = {
         "supabase/config.toml": "[functions.open]\nverify_jwt = false\n[functions.safe]\nverify_jwt = false\n",
@@ -241,7 +304,28 @@ class ThemesAndDualTest(RepoCase):
         self.assertIn("| pub | FALSE | NENHUMA |", built["tema:acesso-publico"].inventory)
         self.assertIn("src/pages/PublicSurvey.tsx", built["tema:acesso-publico"].inventory)
         self.assertIn("pub", built["tema:dados-sensiveis"].inventory)
+        self.assertIn("Policies RLS no estado final", built["tema:matriz-rls-papeis"].inventory)
         self.assertEqual(units.rule_groups("tema:funcoes-privilegiadas"), frozenset({"SQL", "DB"}))
+        self.assertEqual(units.rule_groups("tema:matriz-rls-papeis"), frozenset({"SQL", "DB", "FE"}))
+
+
+class OffensivePrechecksTest(RepoCase):
+    FILES = {
+        "supabase/migrations/20250101000000_offense.sql": (
+            "CREATE TABLE public.profiles (id uuid, role text);\n"
+            "ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;\n"
+            "CREATE POLICY \"self_edit\" ON public.profiles FOR UPDATE TO authenticated USING (id = auth.uid());\n"
+            "CREATE FUNCTION public.dyn(q text) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$\n"
+            "BEGIN EXECUTE format('SELECT %s', q); END $$;\n"
+        ),
+        "supabase/functions/save/index.ts": "await supa.from('profiles').update(body)\n",
+    }
+
+    def test_detects_update_without_with_check_dynamic_sql_and_mass_assignment(self):
+        texts = [h.text() for h in self.hints()[0]]
+        self.assertTrue(any("[SQL-2]" in t and "não tem WITH CHECK" in t for t in texts), texts)
+        self.assertTrue(any("[SQL-2]" in t and "EXECUTE dinâmico" in t for t in texts), texts)
+        self.assertTrue(any("[DB-2]" in t and "atribuição em massa" in t for t in texts), texts)
 
     def test_code_mode_reviews_themes_first_with_dual_review_and_hints(self):
         store = Store(self.cfg.data_dir / "state.db")
@@ -275,6 +359,11 @@ class BenchMatchTest(unittest.TestCase):
         elsewhere = self.finding("Usa x-cron-secret errado", "supabase/functions/outra/index.ts")
         self.assertEqual(bench.match(self.CASE, [elsewhere])[0], "parcial")
         self.assertEqual(bench.match(self.CASE, [self.finding("Outra coisa", "a.ts")])[0], "perdeu")
+
+    def test_location_may_be_named_in_the_text(self):
+        """Migrations têm nome genérico: o nome da função citado no achado conta como local certo."""
+        hit = self.finding("process-automated-notifications aceita a chave anônima", "supabase/migrations/2025_x.sql")
+        self.assertEqual(bench.match(self.CASE, [hit])[0], "achou")
 
     def test_every_cases_file_is_well_formed(self):
         """Valida os casos de qualquer perfil instalado (perfis próprios ficam fora do git)."""

@@ -162,6 +162,15 @@ class PipelineTest(unittest.TestCase):
         msg = report.slack_message(1, "a" * 7, "b" * 7, [self.FINDING], include_details=False)
         self.assertNotIn("> d", msg)
 
+    def test_gatekeeper_diff_uses_dual_review_and_hints(self):
+        commit(self.origin, {"supabase/functions/x/index.ts": "await supa.from('t').update(body)\n"}, "c3")
+        with mock.patch("reviewer.llm.review_chunks", return_value=([dict(self.FINDING)], [])) as rv:
+            main.run_review(self.cfg, self.store, None, dry_run=True, base_sha="HEAD~1", gatekeeper=True)
+        self.assertTrue(rv.called)
+        self.assertTrue(rv.call_args.kwargs["dual"])
+        self.assertTrue(any("atribuição em massa" in h for h in rv.call_args.kwargs["hints"]))
+        self.assertIsNone(self.store.get("last_sha"))
+
 
 if __name__ == "__main__":
     unittest.main()

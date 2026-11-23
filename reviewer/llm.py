@@ -27,6 +27,7 @@ REPORT_FINDINGS = {
                     "properties": {
                         "regra": {"type": "string", "description": "ID da regra do checklist (ex.: EF-2, DB-1)"},
                         "severity": {"type": "string", "enum": SEVERITIES},
+                        "cwe": {"type": ["string", "null"], "description": "CWE principal (ex.: CWE-639); null se não houver um claro"},
                         "file": {"type": "string"},
                         "line": {"type": ["integer", "null"]},
                         "title": {"type": "string"},
@@ -107,6 +108,7 @@ def _prompt(cfg: Config, name: str, groups: frozenset[str] | None = None) -> lis
     text = ((ROOT / "prompts" / f"{name}.md").read_text(encoding="utf-8")
             .replace("{{PROJETO}}", p.project)
             .replace("{{CONTEXTO}}", p.context)
+            .replace("{{SEVERIDADE}}", (ROOT / "prompts" / "severidade.md").read_text(encoding="utf-8").strip())
             .replace("{{EXEMPLOS}}", p.examples or "(este perfil não tem exemplos)"))
     return [{"type": "text", "text": f"{text}\n\n{rules_text(p.rules, groups)}",
              "cache_control": {"type": "ephemeral"}}]

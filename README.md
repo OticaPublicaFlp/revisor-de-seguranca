@@ -39,8 +39,12 @@ O que ele procura, por exemplo:
 | Usuário com poder demais | Um usuário "só leitura" que consegue apagar registros |
 | Um cliente vendo dados de outro | Em sistemas com várias empresas no mesmo banco, a empresa A lendo dados da empresa B |
 | Vazamento de dados pessoais | Documento ou telefone aparecendo em logs ou exportações sem controle |
-| Segredos no código | Senha ou chave de API escrita direto no código |
+| Segredos no código | Senha ou chave de API escrita direto no código, inclusive as já apagadas que continuam no histórico do git |
 | Bibliotecas vulneráveis | Pacotes de terceiros com falhas já conhecidas |
+
+O checklist e a escala de gravidade seguem padrões de mercado: **OWASP API Security Top 10**, **OWASP ASVS 5.0**,
+a metodologia de risco da OWASP e as verificações de segurança oficiais do Supabase (Database Advisors). Cada achado
+traz, quando cabe, o código **CWE** do tipo de falha, que ajuda quem vai corrigir a pesquisar a solução.
 
 Ele revisa **um pedaço do código por vez** e lembra o que já revisou. Assim, a base inteira é coberta aos poucos e
 nada é revisado de novo sem necessidade.
@@ -340,12 +344,14 @@ profiles/         exemplo/ (público) e os seus perfis (ignorados pelo git)
 
 | Camada | O que faz |
 |---|---|
-| **Pistas (scripts)** | Reduz as migrations ao **estado final** (última definição de cada função/policy/GRANT, quem executa cada função, inclusive `REVOKE` por SQL dinâmico em blocos `DO`). Aponta: `verify_jwt=false` sem autenticação; service role sem filtro de tenant; `SECURITY DEFINER` executável pelo app que escreve sem conferir papel ou sem `search_path`; policies/GRANTs para `anon`/`public`; `fetch` em URL não validada; segredos (chaves conhecidas e JWT com `role=service_role`, sem nunca mostrar o valor); PII em log; `dangerouslySetInnerHTML`. Viram pistas que o revisor confirma ou descarta. |
+| **Pistas (scripts)** | Reduz as migrations ao **estado final** (última definição de cada função/policy/GRANT, quem executa cada função, inclusive `REVOKE` por SQL dinâmico em blocos `DO`). Aponta: `verify_jwt=false` sem autenticação; service role sem filtro de tenant; `SECURITY DEFINER` executável pelo app que escreve sem conferir papel ou sem `search_path`; policies/GRANTs para `anon`/`public`; versão estática dos **Database Advisors** do Supabase (tabela sem RLS, privilégios padrão de `anon` nunca revogados, policy com `user_metadata`, policy de escrita sempre verdadeira, view sem `security_invoker`, bucket público sem `allowed_mime_types`); `fetch` em URL não validada; segredos (chaves conhecidas e JWT com `role=service_role`, sem nunca mostrar o valor); PII em log; `dangerouslySetInnerHTML`. Viram pistas que o revisor confirma ou descarta. |
+| **Histórico do git** | `git log -G` atrás de segredos que foram apagados do código mas continuam no histórico (qualquer clone os tem). Vira achado direto, sem modelo, com o valor omitido. |
 | **Dependências** | OSV `querybatch`. Dependência só de dev vale no máximo `low`; pacote instalado fora do registro npm vira `info` com ressalva (o OSV só conhece versões do npm). |
 | **Revisão por unidade** | Cada unidade recebe só as seções do checklist do seu tipo e as pistas dos seus arquivos. |
 | **Temas transversais** | `entradas`, `acesso-publico`, `dados-sensiveis`, `funcoes-privilegiadas`. Reavaliados quando o inventário muda. |
 | **Revisão dupla** | `DUAL_REVIEW=critical`: Edge Functions, migrations e temas também passam pelo prompt de atacante (perfis: anônimo, papel mais baixo, outro tenant, usuário desativado, quem controla a entrada). |
 | **Verificação** | Um terceiro prompt tenta refutar cada candidato, une duplicados e ajusta a severidade. |
+| **Severidade** | Escala única (`prompts/severidade.md`) nos três prompts: quem consegue explorar (anônimo, qualquer logado, papel baixo, só admin) × o que obtém, no estilo do OWASP Risk Rating. Acesso entre clientes e privilégio que contorna a RLS ao alcance do app são `critical`; dado pessoal ou de saúde em massa é no mínimo `high`. |
 
 Seleção das unidades por execução (`MAX_UNITS`): primeiro as **alteradas**, depois as **nunca revisadas** (temas e
 Edge Functions primeiro), depois as que passaram de `RECHECK_DAYS`. O estado fica em `data/state.db`.

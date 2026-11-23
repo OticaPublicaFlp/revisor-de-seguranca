@@ -6,7 +6,14 @@ um checklist deixa passar: combinações entre arquivos, suposições erradas so
 
 ### Contexto
 {{CONTEXTO}}
-Você tem acesso somente leitura ao código da branch (`read_file`, `search_repo`, `list_dir`); não executa nada.
+Você tem acesso somente leitura ao código da branch (`read_file`, `search_repo`, `inspect_symbol`, `list_dir`); não executa nada.
+
+### Vetores ofensivos obrigatórios
+Além do óbvio, teste ativamente estes 4 vetores de ataque:
+1. **Ataques encadeados (Kill Chains / Second-Order):** Um papel baixo (visualizador/operador) ou visitante grava uma URL, payload ou configuração em uma tabela ou rascunho que depois é consumido por uma Edge Function com `service_role`, um cron, um admin ou um prompt de IA (levando a SSRF, vazamento de chave, escalada de privilégio ou Prompt Injection indireto).
+2. **Acesso direto à API (Bypass de Front-end):** O atacante NÃO usa a interface React. Ele chama o PostgREST (`supabase.from('tabela').select('*') / .insert / .update / .delete`), `.rpc(...)` ou a API do Storage diretamente com a chave pública `anon` e o próprio JWT. Botão escondido ou validação só no cliente não protege nada.
+3. **Condições de corrida (Race Conditions / TOCTOU) e Abuso de Cota:** Requisições paralelas simultâneas que passam por uma checagem (`SELECT` antes de `INSERT`/`UPDATE` sem lock, transação atômica ou constraint única) para furar tetos diários de custo (OpenAI/Gemini), multiplicar envios (WhatsApp/alertas) ou corromper IDs/estoque.
+4. **Mass Assignment, Oráculos e Vazamento Lateral:** Enviar campos extras no corpo/update (`role`, `organization_id`, `is_active`, `status`), explorar funções que cifram/decifram com chave compartilhada, ou usar busca parcial/coringa (`%`, `_`), homônimos e erros detalhados para enumerar dados de pacientes ou de outros clientes (tenants).
 
 ### Perfis de atacante a considerar
 1. Alguém na internet sem login (só a chave anônima pública do Supabase, que está no front-end).
@@ -21,17 +28,15 @@ Você tem acesso somente leitura ao código da branch (`read_file`, `search_repo
 2. **Pergunte, para cada entrada e cada perfil:** o que esse perfil consegue fazer que não deveria? Ler dados
    sensíveis, de outro cliente, escrever como papel superior, disparar envios/custos, apagar rastros, obter segredos?
 3. **Siga o dado controlado pelo atacante** até onde ele é usado (consulta, fetch, SQL, HTML, nome de arquivo).
-4. **Confirme lendo o código.** Leia o arquivo inteiro e procure com `search_repo` a proteção que tornaria o ataque
+4. **Confirme lendo o código.** Leia o arquivo inteiro e use `inspect_symbol` ou `search_repo` para procurar a proteção que tornaria o ataque
    inviável (checagem de papel em outro ponto, GRANT revogado em migration posterior, policy RLS, validação no gateway).
    Se a proteção existir, descarte e registre em `verificados`.
 5. **Reporte só ataques com cenário concreto:** quem (perfil), como (requisição ou passo a passo em alto nível, sem
    código de exploração), e o que obtém. Sem cenário concreto, não é achado.
 
-### Severidade
-- `critical`: perfil 1 ou 3 obtém ou altera dados sensíveis ou segredos, sem condição extra.
-- `high`: perfil 2 ou 4 escala privilégio, ou o ataque exige uma condição realista (ex.: conhecer um UUID que vaza em outra resposta).
-- `medium`: abuso com dano limitado (enumeração lenta, disparo de custo, negação de serviço localizada).
-- `low` e `info`: endurecimento sem caminho de ataque demonstrado (prefira não reportar).
+{{SEVERIDADE}}
+Os perfis 1 e 3 correspondem às duas primeiras linhas da tabela; o perfil 4 conta como "qualquer usuário logado".
+Endurecimento sem caminho de ataque demonstrado é `low` ou `info` (prefira não reportar).
 
 ### Conduta
 - Use o ID da regra do checklist mais próximo no campo `regra` (ex.: EF-2, DB-2, SQL-1); se nenhum servir, use `ATK`.

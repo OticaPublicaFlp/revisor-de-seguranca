@@ -56,6 +56,19 @@ TOOLS = [
             "properties": {"path": {"type": "string"}},
         },
     },
+    {
+        "name": "inspect_symbol",
+        "description": "Raio-X rápido de uma tabela SQL, função/RPC ou módulo compartilhado na branch revisada: "
+                       "mostra onde é definido/alterado nas migrations/config e onde é chamado nas Edge Functions e no front-end. "
+                       "Economiza várias chamadas de search_repo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nome da tabela, função SQL, Edge Function ou módulo (ex.: otica_patients, search_patients, role-guard)"},
+            },
+            "required": ["name"],
+        },
+    },
 ]
 
 
@@ -125,6 +138,34 @@ def list_dir(cfg: Config, repo, head: str, path: str | None = None) -> str:
     return _cap("\n".join(names)) if names else "pasta vazia ou inexistente"
 
 
+def inspect_symbol(cfg: Config, repo, head: str, name: str) -> str:
+    sym = (name or "").strip()
+    if not sym or "\x00" in sym or len(sym) > 120:
+        raise ToolError("informe o nome da tabela, função ou módulo a inspecionar")
+
+    def _hits(scope: str, limit: int) -> list[str]:
+        out = gitrepo._git(cfg, repo, "grep", "-n", "-I", "--no-color", "-m", "5", "-F", "-e", sym,
+                           head, "--", scope, ok=(0, 1))
+        prefix = f"{head}:"
+        rows = []
+        for line in out.splitlines():
+            line = line[len(prefix):] if line.startswith(prefix) else line
+            if DENY.search(line.split(":", 1)[0]):
+                continue
+            rows.append(line[:240])
+            if len(rows) >= limit:
+                break
+        return rows
+
+    sql_hits = _hits("supabase/migrations", 20) + _hits("supabase/config.toml", 5)
+    code_hits = _hits("supabase/functions", 20) + _hits("src", 20)
+    sections = [
+        "## Migrations / Config\n" + ("\n".join(sql_hits) if sql_hits else "nenhuma ocorrência"),
+        "## Código (Edge Functions / Front-end)\n" + ("\n".join(code_hits) if code_hits else "nenhuma ocorrência"),
+    ]
+    return _cap("\n\n".join(sections))
+
+
 def execute(cfg: Config, repo, head: str, name: str, args: dict) -> str:
     """Executa uma ferramenta e devolve texto. Erros viram mensagem para o modelo, nunca exceção."""
     try:
@@ -135,6 +176,8 @@ def execute(cfg: Config, repo, head: str, name: str, args: dict) -> str:
             return search_repo(cfg, repo, head, args.get("pattern", ""), bool(args.get("regex")), args.get("path"))
         if name == "list_dir":
             return list_dir(cfg, repo, head, args.get("path"))
+        if name == "inspect_symbol":
+            return inspect_symbol(cfg, repo, head, args.get("name", ""))
         return f"ferramenta desconhecida: {name}"
     except (ToolError, gitrepo.GitError) as exc:
         return f"erro: {exc}"

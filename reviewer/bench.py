@@ -23,14 +23,19 @@ def _norm(text: str) -> str:
 
 
 def match(case: dict, findings: list[dict]) -> tuple[str, dict | None]:
-    """'achou' (arquivo + palavra-chave), 'parcial' (só palavra-chave) ou 'perdeu'. Casamento heurístico."""
+    """'achou' (local + palavra-chave), 'parcial' (só palavra-chave) ou 'perdeu'. Casamento heurístico.
+
+    O local (match_file) vale no caminho do arquivo ou no texto do achado: migrations têm nome genérico,
+    então "search_patients" costuma aparecer só na descrição.
+    """
     keys = [_norm(k) for k in case["match_any"]]
+    where = _norm(case["match_file"])
     best = None
     for f in findings:
         text = _norm(f"{f['title']} {f['description']}")
         if not any(k in text for k in keys):
             continue
-        if _norm(case["match_file"]) in _norm(f["file"]):
+        if where in _norm(f["file"]) or where in text:
             return "achou", f
         best = best or f
     return ("parcial", best) if best else ("perdeu", None)

@@ -2,6 +2,8 @@
 # Atalho do revisor de segurança. Funciona de qualquer pasta (o install.sh cria um link em ~/.local/bin/check).
 #   check                revisa as próximas unidades e envia o relatório ao Telegram
 #   check simular        revisa e mostra na tela, sem enviar nem gravar nada (= check --dry-run)
+#   check diff           revisa só as mudanças recentes (Gatekeeper, com olhar de atacante)
+#   check diff --dry-run simula o Gatekeeper no último commit (ou use --base HEAD~2)
 #   check configurar     assistente de configuração
 #   check verificar      confere a configuração e as conexões (sem custo de IA)
 #   check units          lista as partes do código e quais serão revisadas
